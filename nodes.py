@@ -392,6 +392,8 @@ class FramePackSampler:
                 "start_embed_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Weighted average constant for image embed interpolation. If end image is not set, the embed's strength won't be affected"}),
                 "initial_samples": ("LATENT", {"tooltip": "init Latents to use for video2video"} ),
                 "denoise_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "t2v_width": ("INT", {"default": 640, "min": 8, "step": 8, "tooltip": "Text-to-video width."}),
+                "t2v_height": ("INT", {"default": 640, "min": 8, "step": 8, "tooltip": "Text-to-video height."}),
             }
         }
 
@@ -401,7 +403,8 @@ class FramePackSampler:
     CATEGORY = "FramePackWrapper"
 
     def process(self, model, shift, positive, negative, latent_window_size, use_teacache, total_second_length, teacache_rel_l1_thresh, steps, cfg,
-                guidance_scale, seed, sampler, gpu_memory_preservation, start_latent=None, image_embeds=None, end_latent=None, end_image_embeds=None, embed_interpolation="linear", start_embed_strength=1.0, initial_samples=None, denoise_strength=1.0):
+                guidance_scale, seed, sampler, gpu_memory_preservation, start_latent=None, image_embeds=None, end_latent=None, end_image_embeds=None, embed_interpolation="linear", start_embed_strength=1.0, initial_samples=None, denoise_strength=1.0,
+                t2v_width=None, t2v_height=None):
         total_latent_sections = (total_second_length * 30) / (latent_window_size * 4)
         total_latent_sections = int(max(round(total_latent_sections), 1))
         print("total_latent_sections: ", total_latent_sections)
@@ -418,6 +421,8 @@ class FramePackSampler:
 
         if start_latent is not None:
             start_latent = start_latent["samples"] * vae_scaling_factor
+        else:
+            start_latent = torch.zeros([1, 16, 0, t2v_height // 8, t2v_width // 8])
         if initial_samples is not None:
             initial_samples = initial_samples["samples"] * vae_scaling_factor
         if end_latent is not None:
