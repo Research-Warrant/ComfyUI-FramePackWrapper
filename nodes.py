@@ -16,14 +16,18 @@ import comfy.model_base
 import comfy.latent_formats
 from comfy.cli_args import args, LatentPreviewMethod
 
+from .utils import log
+
 script_directory = os.path.dirname(os.path.abspath(__file__))
 vae_scaling_factor = 0.476986
 
-from .diffusers_helper.models.hunyuan_video_packed import HunyuanVideoTransformer3DModelPacked
+from .diffusers_helper.models.hunyuan_video_packed import HunyuanVideoTransformer3DModel
 from .diffusers_helper.memory import DynamicSwapInstaller, move_model_to_device_with_memory_preservation, offload_model_from_device_for_memory_preservation
 from .diffusers_helper.pipelines.k_diffusion_hunyuan import sample_hunyuan
 from .diffusers_helper.utils import crop_or_pad_yield_mask
 from .diffusers_helper.bucket_tools import find_nearest_bucket
+
+from diffusers.loaders.lora_conversion_utils import _convert_hunyuan_video_lora_to_diffusers
 
 class HyVideoModel(comfy.model_base.BaseModel):
     def __init__(self, *args, **kwargs):
@@ -126,7 +130,7 @@ class DownloadAndLoadFramePackModel:
                 local_dir_use_symlinks=False,
             )
 
-        transformer = HunyuanVideoTransformer3DModelPacked.from_pretrained(model_path, torch_dtype=base_dtype, attention_mode=attention_mode).cpu()
+        transformer = HunyuanVideoTransformer3DModel.from_pretrained(model_path, torch_dtype=base_dtype, attention_mode=attention_mode).cpu()
         params_to_keep = {"norm", "bias", "time_in", "vector_in", "guidance_in", "txt_in", "img_in"}
         if quantization == 'fp8_e4m3fn' or quantization == 'fp8_e4m3fn_fast':
             transformer = transformer.to(torch.float8_e4m3fn)
@@ -156,6 +160,42 @@ class DownloadAndLoadFramePackModel:
         }
         return (pipe, )
     
+class FramePackLoraSelect:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+               "lora": (folder_paths.get_filename_list("loras"),
+                {"tooltip": "LORA models are expected to be in ComfyUI/models/loras with .safetensors extension"}),
+                "strength": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.0001, "tooltip": "LORA strength, set to 0.0 to unmerge the LORA"}),
+                "fuse_lora": ("BOOLEAN", {"default": True, "tooltip": "Fuse the LORA model with the base model. This is recommended for better performance."}),
+            },
+            "optional": {
+                "prev_lora":("FPLORA", {"default": None, "tooltip": "For loading multiple LoRAs"}),
+            }
+        }
+
+    RETURN_TYPES = ("FPLORA",)
+    RETURN_NAMES = ("lora", )
+    FUNCTION = "getlorapath"
+    CATEGORY = "FramePackWrapper"
+    DESCRIPTION = "Select a LoRA model from ComfyUI/models/loras"
+
+    def getlorapath(self, lora, strength, prev_lora=None, fuse_lora=True):
+        loras_list = []
+
+        lora = {
+            "path": folder_paths.get_full_path("loras", lora),
+            "strength": strength,
+            "name": lora.split(".")[0],
+            "fuse_lora": fuse_lora,
+        }
+        if prev_lora is not None:
+            loras_list.extend(prev_lora)
+
+        loras_list.append(lora)
+        return (loras_list,)
+    
 class LoadFramePackModel:
     @classmethod
     def INPUT_TYPES(s):
@@ -165,6 +205,7 @@ class LoadFramePackModel:
 
             "base_precision": (["fp32", "bf16", "fp16"], {"default": "bf16"}),
             "quantization": (['disabled', 'fp8_e4m3fn', 'fp8_e4m3fn_fast', 'fp8_e5m2'], {"default": 'disabled', "tooltip": "optional quantization method"}),
+            "load_device": (["main_device", "offload_device"], {"default": "cuda", "tooltip": "Initialize the model on the main device or offload device"}),
             },
             "optional": {
                 "attention_mode": ([
@@ -173,6 +214,7 @@ class LoadFramePackModel:
                     "sageattn",
                     ], {"default": "sdpa"}),
                 "compile_args": ("FRAMEPACKCOMPILEARGS", ),
+                "lora": ("FPLORA", {"default": None, "tooltip": "LORA model to load"}),
             }
         }
 
@@ -182,12 +224,16 @@ class LoadFramePackModel:
     CATEGORY = "FramePackWrapper"
 
     def loadmodel(self, model, base_precision, quantization,
-                  compile_args=None, attention_mode="sdpa"):
+                  compile_args=None, attention_mode="sdpa", lora=None, load_device="main_device"):
         
         base_dtype = {"fp8_e4m3fn": torch.float8_e4m3fn, "fp8_e4m3fn_fast": torch.float8_e4m3fn, "bf16": torch.bfloat16, "fp16": torch.float16, "fp16_fast": torch.float16, "fp32": torch.float32}[base_precision]
 
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
+        if load_device == "main_device":
+            transformer_load_device = device
+        else:
+            transformer_load_device = offload_device
 
         model_path = folder_paths.get_full_path_or_raise("diffusion_models", model)
         model_config_path = os.path.join(script_directory, "transformer_config.json")
@@ -197,24 +243,74 @@ class LoadFramePackModel:
         sd = load_torch_file(model_path, device=offload_device, safe_load=True)
         
         with init_empty_weights():
-            transformer = HunyuanVideoTransformer3DModelPacked(**config, attention_mode=attention_mode)
+            transformer = HunyuanVideoTransformer3DModel(**config, attention_mode=attention_mode)
 
         params_to_keep = {"norm", "bias", "time_in", "vector_in", "guidance_in", "txt_in", "img_in"}
-        if quantization == "fp8_e4m3fn" or quantization == "fp8_e4m3fn_fast" or quantization == "fp8_scaled":
+        if lora is not None:
+            dtype = base_dtype
+        elif quantization == "fp8_e4m3fn" or quantization == "fp8_e4m3fn_fast" or quantization == "fp8_scaled":
             dtype = torch.float8_e4m3fn
         elif quantization == "fp8_e5m2":
             dtype = torch.float8_e5m2
         else:
             dtype = base_dtype
+
         print("Using accelerate to load and assign model weights to device...")
         param_count = sum(1 for _ in transformer.named_parameters())
-        for name, param in tqdm(transformer.named_parameters(), 
-                desc=f"Loading transformer parameters to {offload_device}", 
+        for name, param in tqdm(transformer.named_parameters(),
+                desc=f"Loading transformer parameters to {transformer_load_device}", 
                 total=param_count,
                 leave=True):
             dtype_to_use = base_dtype if any(keyword in name for keyword in params_to_keep) else dtype
    
-            set_module_tensor_to_device(transformer, name, device=offload_device, dtype=dtype_to_use, value=sd[name])
+            set_module_tensor_to_device(transformer, name, device=transformer_load_device, dtype=dtype_to_use, value=sd[name])
+
+
+        if lora is not None:
+            adapter_list = []
+            adapter_weights = []
+            
+            for l in lora:
+                fuse = True if l["fuse_lora"] else False
+                lora_sd = load_torch_file(l["path"])
+                
+                
+                if "lora_unet_single_transformer_blocks_0_attn_to_k.lora_up.weight" in lora_sd:
+                    from .utils import convert_to_diffusers
+                    lora_sd = convert_to_diffusers("lora_unet_", lora_sd)
+                
+                if not "transformer.single_transformer_blocks.0.attn_to.k.lora_A.weight" in lora_sd:
+                    log.info(f"Converting LoRA weights from {l['path']} to diffusers format...")
+                    lora_sd = _convert_hunyuan_video_lora_to_diffusers(lora_sd)
+
+                lora_rank = None            
+                for key, val in lora_sd.items():
+                    if "lora_B" in key or "lora_up" in key:
+                        lora_rank = val.shape[1]
+                        break
+                if lora_rank is not None:
+                    log.info(f"Merging rank {lora_rank} LoRA weights from {l['path']} with strength {l['strength']}")
+                    adapter_name = l['path'].split("/")[-1].split(".")[0]
+                    adapter_weight = l['strength']
+                    transformer.load_lora_adapter(lora_sd, weight_name=l['path'].split("/")[-1], lora_rank=lora_rank, adapter_name=adapter_name)
+                    
+                    adapter_list.append(adapter_name)
+                    adapter_weights.append(adapter_weight)
+                
+                del lora_sd
+                mm.soft_empty_cache()
+            if adapter_list:
+                transformer.set_adapters(adapter_list, weights=adapter_weights)
+                if fuse:
+                    lora_scale = 1
+                    transformer.fuse_lora(lora_scale=lora_scale)
+                    transformer.delete_adapters(adapter_list)
+
+            if quantization == "fp8_e4m3fn" or quantization == "fp8_e4m3fn_fastmode":
+                params_to_keep = {"norm", "bias", "time_in", "vector_in", "guidance_in", "txt_in", "img_in"}
+                for name, param in transformer.named_parameters():
+                    if not any(keyword in name for keyword in params_to_keep):
+                        param.data = param.data.to(torch.float8_e4m3fn)
 
         if quantization == "fp8_e4m3fn_fast":
             from .fp8_optimization import convert_fp8_linear
@@ -291,8 +387,8 @@ class FramePackSampler:
                 "start_latent": ("LATENT", {"tooltip": "init Latents to use for image2video"} ),
                 "end_latent": ("LATENT", {"tooltip": "end Latents to use for image2video"} ),
                 "end_image_embeds": ("CLIP_VISION_OUTPUT", {"tooltip": "end Image's clip embeds"} ),
-                "embed_interpolation": (["weighted_average", "linear"], {"default": 'linear', "tooltip": "Image embedding interpolation type. If linear, will smoothly interpolate with time, else it'll be weighted average with the specified weight."}),
-                "start_embed_strength": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Weighted average constant for image embed interpolation. If end image is not set, the embed's strength won't be affected"}),
+                "embed_interpolation": (["disabled", "weighted_average", "linear"], {"default": 'disabled', "tooltip": "Image embedding interpolation type. If linear, will smoothly interpolate with time, else it'll be weighted average with the specified weight."}),
+                "start_embed_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Weighted average constant for image embed interpolation. If end image is not set, the embed's strength won't be affected"}),
                 "initial_samples": ("LATENT", {"tooltip": "init Latents to use for video2video"} ),
                 "denoise_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
             }
@@ -389,15 +485,19 @@ class FramePackSampler:
             is_first_section = latent_padding == latent_paddings[0]
             latent_padding_size = latent_padding * latent_window_size
 
-            if embed_interpolation == "linear":
-                if total_latent_sections <= 1:
-                    frac = 1.0  # Handle case with only one section
-                else:
-                    frac = 1 - i / (total_latent_sections - 1)  # going backwards
-            else:
-                frac = start_embed_strength if has_end_image else 1.0
 
-            image_encoder_last_hidden_state = start_image_encoder_last_hidden_state * frac + (1 - frac) * end_image_encoder_last_hidden_state
+            if embed_interpolation != "disabled":
+                if embed_interpolation == "linear":
+                    if total_latent_sections <= 1:
+                        frac = 1.0  # Handle case with only one section
+                    else:
+                        frac = 1 - i / (total_latent_sections - 1)  # going backwards
+                else:
+                    frac = start_embed_strength if has_end_image else 1.0
+
+                image_encoder_last_hidden_state = start_image_encoder_last_hidden_state * frac + (1 - frac) * end_image_encoder_last_hidden_state
+            else:
+                image_encoder_last_hidden_state = start_image_encoder_last_hidden_state * start_embed_strength
 
             print(f'latent_padding_size = {latent_padding_size}, is_last_section = {is_last_section}, is_first_section = {is_first_section}')
 
@@ -414,7 +514,7 @@ class FramePackSampler:
                 clean_latents_post = end_latent.to(history_latents)
                 clean_latents = torch.cat([clean_latents_pre, clean_latents_post], dim=2)
 
-            #vid2vid
+            #vid2vid WIP
             
             if initial_samples is not None:
                 total_length = initial_samples.shape[2]
@@ -500,6 +600,7 @@ NODE_CLASS_MAPPINGS = {
     "FramePackTorchCompileSettings": FramePackTorchCompileSettings,
     "FramePackFindNearestBucket": FramePackFindNearestBucket,
     "LoadFramePackModel": LoadFramePackModel,
+    "FramePackLoraSelect": FramePackLoraSelect,
     }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "DownloadAndLoadFramePackModel": "(Down)Load FramePackModel",
@@ -507,5 +608,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FramePackTorchCompileSettings": "Torch Compile Settings",
     "FramePackFindNearestBucket": "Find Nearest Bucket",
     "LoadFramePackModel": "Load FramePackModel",
+    "FramePackLoraSelect": "Select Lora",
     }
 
