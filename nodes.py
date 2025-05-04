@@ -244,7 +244,7 @@ class LoadFramePackModel:
         
         with init_empty_weights():
             transformer = HunyuanVideoTransformer3DModel(**config, attention_mode=attention_mode)
-        
+
         params_to_keep = {"norm", "bias", "time_in", "vector_in", "guidance_in", "txt_in", "img_in"}
         if lora is not None:
             dtype = base_dtype
@@ -484,6 +484,7 @@ class FramePackSampler:
             is_last_section = latent_padding == 0
             is_first_section = latent_padding == latent_paddings[0]
             latent_padding_size = latent_padding * latent_window_size
+
 
             if embed_interpolation != "disabled":
                 if embed_interpolation == "linear":
