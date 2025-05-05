@@ -247,9 +247,7 @@ class LoadFramePackModel:
             transformer = HunyuanVideoTransformer3DModel(**config, attention_mode=attention_mode)
 
         params_to_keep = {"norm", "bias", "time_in", "vector_in", "guidance_in", "txt_in", "img_in"}
-        if lora is not None:
-            dtype = base_dtype
-        elif quantization == "fp8_e4m3fn" or quantization == "fp8_e4m3fn_fast" or quantization == "fp8_scaled":
+        if quantization == "fp8_e4m3fn" or quantization == "fp8_e4m3fn_fast" or quantization == "fp8_scaled":
             dtype = torch.float8_e4m3fn
         elif quantization == "fp8_e5m2":
             dtype = torch.float8_e5m2
@@ -373,6 +371,7 @@ class FramePackSampler:
                 "model": ("FramePackMODEL",),
                 "positive": ("CONDITIONING",),
                 "negative": ("CONDITIONING",),
+                "start_latent": ("LATENT", {"tooltip": "init Latents to use for image2video"} ),
                 "steps": ("INT", {"default": 30, "min": 1}),
                 "use_teacache": ("BOOLEAN", {"default": True, "tooltip": "Use teacache for faster sampling."}),
                 "teacache_rel_l1_thresh": ("FLOAT", {"default": 0.15, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "The threshold for the relative L1 loss."}),
@@ -380,16 +379,12 @@ class FramePackSampler:
                 "guidance_scale": ("FLOAT", {"default": 10.0, "min": 0.0, "max": 32.0, "step": 0.01}),
                 "shift": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1000.0, "step": 0.01}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "sampler": (["unipc_bh1", "unipc_bh2"], {"default": 'unipc_bh1', "tooltip": "Currently only unipc supported"}),
                 "latent_window_size": ("INT", {"default": 9, "min": 1, "max": 33, "step": 1, "tooltip": "The size of the latent window to use for sampling."}),
                 "total_second_length": ("FLOAT", {"default": 5, "min": 1, "max": 120, "step": 0.1, "tooltip": "The total length of the video in seconds."}),
                 "gpu_memory_preservation": ("FLOAT", {"default": 6.0, "min": 0.0, "max": 128.0, "step": 0.1, "tooltip": "The amount of GPU memory to preserve."}),
-                "sampler": (["unipc_bh1", "unipc_bh2"],
-                    {
-                        "default": 'unipc_bh1'
-                    }),
             },
             "optional": {
-                "start_latent": ("LATENT", {"tooltip": "init Latents to use for image2video"} ),
                 "image_embeds": ("CLIP_VISION_OUTPUT", ),
                 "end_latent": ("LATENT", {"tooltip": "end Latents to use for image2video"} ),
                 "end_image_embeds": ("CLIP_VISION_OUTPUT", {"tooltip": "end Image's clip embeds"} ),
