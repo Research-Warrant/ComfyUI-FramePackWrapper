@@ -247,9 +247,7 @@ class LoadFramePackModel:
             transformer = HunyuanVideoTransformer3DModel(**config, attention_mode=attention_mode)
 
         params_to_keep = {"norm", "bias", "time_in", "vector_in", "guidance_in", "txt_in", "img_in"}
-        if lora is not None:
-            dtype = base_dtype
-        elif quantization == "fp8_e4m3fn" or quantization == "fp8_e4m3fn_fast" or quantization == "fp8_scaled":
+        if quantization == "fp8_e4m3fn" or quantization == "fp8_e4m3fn_fast" or quantization == "fp8_scaled":
             dtype = torch.float8_e4m3fn
         elif quantization == "fp8_e5m2":
             dtype = torch.float8_e5m2
