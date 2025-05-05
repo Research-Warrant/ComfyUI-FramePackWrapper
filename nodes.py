@@ -390,7 +390,7 @@ class FramePackSampler:
                 "image_embeds": ("CLIP_VISION_OUTPUT", ),
                 "end_latent": ("LATENT", {"tooltip": "end Latents to use for image2video"} ),
                 "end_image_embeds": ("CLIP_VISION_OUTPUT", {"tooltip": "end Image's clip embeds"} ),
-                "sampler": (["unipc_bh1", "unipc_bh2"], {"default": 'unipc_bh1'}),
+                "sampler": ("SAMPLER", ["unipc_bh1", "unipc_bh2"], {"default": 'unipc_bh1'}),
                 "embed_interpolation": (["disabled", "weighted_average", "linear"], {"default": 'disabled', "tooltip": "Image embedding interpolation type. If linear, will smoothly interpolate with time, else it'll be weighted average with the specified weight."}),
                 "start_embed_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Weighted average constant for image embed interpolation. If end image is not set, the embed's strength won't be affected"}),
                 "initial_samples": ("LATENT", {"tooltip": "init Latents to use for video2video"} ),
